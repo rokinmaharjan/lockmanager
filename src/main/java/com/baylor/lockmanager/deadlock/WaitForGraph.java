@@ -12,13 +12,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.baylor.lockmanager.transaction.Transaction;
 
-class WaitForGraph {
-	private final ConcurrentMap<Transaction, Set<Transaction>> adjacencyList = new ConcurrentHashMap<>();
+public class WaitForGraph {
+	public final ConcurrentMap<Transaction, Set<Transaction>> adjacencyList = new ConcurrentHashMap<>();
 	private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
 	private final Lock sharedLock = rwl.readLock();
 	private final Lock exclusiveLock = rwl.readLock();
 
-	void add(Transaction predecessor, Set<Transaction> successors) {
+	public void add(Transaction predecessor, Set<Transaction> successors) {
 		sharedLock.lock();
 		try {
 			Set<Transaction> txnList = adjacencyList.getOrDefault(predecessor, new ConcurrentSkipListSet<>());
@@ -29,7 +29,7 @@ class WaitForGraph {
 		}
 	}
 
-	void remove(Transaction txn) {
+	public void remove(Transaction txn) {
 		sharedLock.lock();
 		try {
 			adjacencyList.remove(txn);
@@ -57,15 +57,17 @@ class WaitForGraph {
 		}
 	}
 
-	void detectDeadlock(Transaction currentTxn) {
+	public boolean detectDeadlock(Transaction currentTxn) {
 		List<List<Transaction>> cycles = findCycles();
 
 		for (List<Transaction> cycleGroup : cycles) {
 			if (cycleGroup.contains(currentTxn)) {
-				// ROLLBACK HERE
 //                currentTxn.abort();
+				return true;
 			}
 		}
+
+		return false;
 	}
 
 	private void removeSuccessor(Transaction txnToRemove) {

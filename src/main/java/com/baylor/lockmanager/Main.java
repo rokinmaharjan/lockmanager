@@ -8,10 +8,12 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.commons.collections.map.HashedMap;
 
+import com.baylor.lockmanager.deadlock.WaitForGraph;
 import com.baylor.lockmanager.enums.LockType;
 import com.baylor.lockmanager.enums.OperationType;
 import com.baylor.lockmanager.lock.Lock;
@@ -22,15 +24,14 @@ import com.baylor.lockmanager.utils.StringUtils;
 
 public class Main {
 
-	private static final String INPUT_FILE_NAME = "operations.txt";
-
 	private static List<Transaction> activeTransactions = new ArrayList<Transaction>();
 	private static List<Lock> locks = new ArrayList<Lock>();
 	private static String[] dbValue = new String[32];
+	private static WaitForGraph waitForGraph = new WaitForGraph();
 
 	private static void createLocksForAllDataId() {
 		for (int i = 0; i < 32; i++) {
-			Lock lock = new Lock();
+			Lock lock = new Lock(waitForGraph);
 			lock.setDataId(i);
 
 			locks.add(lock);
@@ -49,20 +50,21 @@ public class Main {
 
 	@SuppressWarnings({ "unchecked", "serial" })
 	private static void handleRead(String dataIdString, String transactionId) {
+		Transaction transaction = TransactionService.getTransactionById(transactionId, activeTransactions);
+
 		int dataId = Integer.valueOf(dataIdString);
 
 		Lock lock = LockService.getLockByDataId(dataId, locks);
 
 		if (lock.getLockList().size() == 0) {
 			System.out.println(String.format("Output of Read %s %s: %s", dataIdString, transactionId, dbValue[dataId]));
+			lock.getOwners().add(transaction);
 
 			lock.getLockList().add(new HashedMap() {
 				{
 					put(transactionId, LockType.READ);
 				}
 			});
-
-			System.out.println("DataId: " + dataIdString + " " + lock.getLockList());
 
 			return;
 		}
@@ -70,24 +72,33 @@ public class Main {
 		boolean writeLockPresent = LockService.checkIfWriteLockPresent(lock);
 		if (!writeLockPresent) {
 			System.out.println(String.format("Output of Read %s %s: %s", dataIdString, transactionId, dbValue[dataId]));
+			lock.getOwners().add(transaction);
 
 			lock.getLockList().add(new HashedMap() {
 				{
 					put(transactionId, LockType.READ);
 				}
 			});
-
-			System.out.println("DataId: " + dataIdString + " " + lock.getLockList());
 
 			return;
 		} else {
-			lock.getLockList().add(new HashedMap() {
-				{
-					put(transactionId, LockType.READ);
-				}
-			});
 
-			System.out.println("DataId: " + dataIdString + " " + lock.getLockList());
+			WaitForGraph wfg = lock.getWaitForGraph();
+			wfg.add(transaction, lock.getOwners());
+			boolean deadlockDetected = wfg.detectDeadlock(transaction);
+
+			if (deadlockDetected) {
+				System.out.println(String.format("Deadlock detected!! Initiating rollback"));
+				// ROLLBACK HERE
+				handleRollback(transactionId);
+
+			} else {
+				lock.getLockList().add(new HashedMap() {
+					{
+						put(transactionId, LockType.READ);
+					}
+				});
+			}
 
 			return;
 		}
@@ -95,6 +106,8 @@ public class Main {
 
 	@SuppressWarnings({ "unchecked", "serial" })
 	private static void handleWrite(String dataIdString, String transactionId) {
+		Transaction transaction = TransactionService.getTransactionById(transactionId, activeTransactions);
+
 		int dataId = Integer.valueOf(dataIdString);
 
 		Lock lock = LockService.getLockByDataId(dataId, locks);
@@ -102,32 +115,46 @@ public class Main {
 		if (lock.getLockList().size() == 0) {
 			dbValue[dataId] = StringUtils.flipBit(dbValue[dataId]);
 
+			Map<String, Integer> writeCount = lock.getWriteCount();
+
+			int writeCountInt = 0;
+			if (!writeCount.isEmpty() && !(writeCount.get(transactionId) == null)) {
+				writeCountInt = writeCount.get(transactionId);
+			}
+
+			writeCount.put(transactionId, writeCountInt + 1);
+
 			System.out.println(
 					String.format("Output of Write %s %s: %s", dataIdString, transactionId, Arrays.toString(dbValue)));
+			lock.getOwners().add(transaction);
 
 			lock.getLockList().add(new HashedMap() {
 				{
 					put(transactionId, LockType.WRITE);
 				}
 			});
-
-			System.out.println("DataId: " + dataIdString + " " + lock.getLockList());
 
 			return;
 		} else {
-			lock.getLockList().add(new HashedMap() {
-				{
-					put(transactionId, LockType.WRITE);
-				}
-			});
+			WaitForGraph wfg = lock.getWaitForGraph();
+			wfg.add(transaction, lock.getOwners());
+			boolean deadlockDetected = wfg.detectDeadlock(transaction);
 
-			System.out.println("DataId: " + dataIdString + " " + lock.getLockList());
+			if (deadlockDetected) {
+				System.out.println(String.format("Deadlock detected!! Initiaing rollback"));
+				// ROLLBACK HERE
+				handleRollback(transactionId);
+
+			} else {
+				lock.getLockList().add(new HashedMap() {
+					{
+						put(transactionId, LockType.WRITE);
+					}
+				});
+			}
 
 			return;
 		}
-	}
-
-	private static void executeReadAfterCommit(int dataId, String transactionId) {
 
 	}
 
@@ -140,7 +167,6 @@ public class Main {
 
 			List<Map<String, LockType>> updatedLockList = new ArrayList<Map<String, LockType>>();
 
-			boolean grantNext = false;
 			for (Map<String, LockType> transactionLockMap : lockListClone) {
 				Map.Entry<String, LockType> firstTransactionLockMap = transactionLockMap.entrySet().iterator().next();
 
@@ -151,47 +177,110 @@ public class Main {
 						}
 					});
 
-					grantNext = true;
-				}
-
-				if (!firstTransactionLockMap.getKey().equals(transactionId) && grantNext) {
-					switch (firstTransactionLockMap.getValue()) {
-					case READ:
-						executeReadAfterCommit(lock.getDataId(), transactionId);
-
-						grantNext = false;
-						break;
-
-//					case WRITE:
-//						handleWrite(String.valueOf(lock.getDataId()), transactionId);
-//						grantNext = false;
-//						break;
-					default:
-						break;
-					}
 				}
 			}
 
 			lock.setLockList(updatedLockList);
+		}
 
+//		List<Map<String, LockType>> lockListClone = new ArrayList<Map<String, LockType>>(lock.getLockList());
+
+		for (Lock lock : locksContainingLockList) {
+			List<Map<String, LockType>> lockListClone = new ArrayList<Map<String, LockType>>(lock.getLockList());
+			lock.setLockList(new ArrayList<Map<String, LockType>>());
+
+			for (Map<String, LockType> transactionLockMap : lockListClone) {
+				Map.Entry<String, LockType> firstTransactionLockMap = transactionLockMap.entrySet().iterator().next();
+
+				if (firstTransactionLockMap.getValue() == LockType.READ) {
+					handleRead(String.valueOf(lock.getDataId()), firstTransactionLockMap.getKey());
+				} else {
+					handleWrite(String.valueOf(lock.getDataId()), firstTransactionLockMap.getKey());
+				}
+
+//				if (!firstTransactionLockMap.getKey().equals(transactionId)) {
+//					updatedLockList.add(new HashedMap() {
+//						{
+//							put(firstTransactionLockMap.getKey(), firstTransactionLockMap.getValue());
+//						}
+//					});
+//
+//				}
+			}
 		}
 
 	}
 
-	private static void handleRollback(String string) {
-		// TODO Auto-generated method stub
+	@SuppressWarnings({ "unchecked", "serial" })
+	private static void handleRollback(String transactionId) {
+		List<Lock> locksContainingLockList = LockService.getLocksContainingLockList(locks);
 
+		for (Lock lock : locksContainingLockList) {
+			List<Map<String, LockType>> lockListClone = new ArrayList<Map<String, LockType>>(lock.getLockList());
+
+			List<Map<String, LockType>> updatedLockList = new ArrayList<Map<String, LockType>>();
+
+			for (Map<String, LockType> transactionLockMap : lockListClone) {
+				Map.Entry<String, LockType> firstTransactionLockMap = transactionLockMap.entrySet().iterator().next();
+
+				if (!firstTransactionLockMap.getKey().equals(transactionId)) {
+					updatedLockList.add(new HashedMap() {
+						{
+							put(firstTransactionLockMap.getKey(), firstTransactionLockMap.getValue());
+						}
+					});
+				}
+			}
+
+			lock.setLockList(updatedLockList);
+		}
+
+		for (Lock lock : locksContainingLockList) {
+			Map<String, Integer> m = lock.getWriteCount();
+			int writeCount = 0;
+			if (!m.isEmpty()) {
+				writeCount = m.get(transactionId);
+			}
+
+			for (int i = 0; i < writeCount; i++) {
+				dbValue[lock.getDataId()] = StringUtils.flipBit(dbValue[lock.getDataId()]);
+			}
+		}
+
+		// Remove from active transactions
+//		activeTransactions.remove(locksContainingLockList);
 	}
 
 	private static void handleEOF() {
 		List<Lock> locksContainingLockList = LockService.getLocksContainingLockList(locks);
 
+		System.out.println("===========================================================");
+		System.out.println("Lock tables shown below: ");
 		for (Lock lock : locksContainingLockList) {
 			if (lock.getLockList().size() > 0) {
 				System.out.println(
 						String.format("Final lock table for dataId '%s':  %s", lock.getDataId(), lock.getLockList()));
 			}
+			System.out.println("-----------------------------------------------------------");
 		}
+
+		System.out.println("===========================================================");
+		System.out.println("Transaction dependencies shown below: ");
+		for (Map.Entry<Transaction, Set<Transaction>> entry : waitForGraph.adjacencyList.entrySet()) {
+			Transaction key = entry.getKey();
+
+			Set<Transaction> value = entry.getValue();
+
+			System.out.println(String.format("Transaction Id: %s", key.getId()));
+			for (Transaction transaction : value) {
+				System.out.println(transaction.getId());
+			}
+
+			System.out.println("-----------------------------------------------------------");
+		}
+
+		System.out.println("===========================================================");
+		System.out.println(String.format("Final value in db: %s", Arrays.toString(dbValue)));
 	}
 
 	private static void performOpeartions(List<String> operations) {
@@ -231,10 +320,8 @@ public class Main {
 	}
 
 	public static void main(String[] args) throws IOException {
-		final List<String> input = Files.lines(Paths.get(INPUT_FILE_NAME)).collect(Collectors.toList());
-
-		input.forEach(System.out::println);
-		System.out.println("=====================");
+		String inputFilePath = args[0];
+		final List<String> input = Files.lines(Paths.get(inputFilePath)).collect(Collectors.toList());
 
 		int initialValue = Integer.valueOf(input.get(0));
 		String initialValueBinary = StringUtils.convertIntToBinary(initialValue);
@@ -242,12 +329,13 @@ public class Main {
 		dbValue = initialValueBinary.split("");
 		Collections.reverse(Arrays.asList(dbValue));
 
+		System.out.println(String.format("Initial value in db: %s", Arrays.toString(dbValue)));
+		System.out.println("===========================================================");
+
 		input.remove(0);
 
 		createLocksForAllDataId();
 
 		performOpeartions(input);
-		System.out.println(String.format("Final value in db: %s", Arrays.toString(dbValue)));
-
 	}
 }

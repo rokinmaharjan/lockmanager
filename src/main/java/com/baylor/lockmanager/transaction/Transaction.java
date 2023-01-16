@@ -1,6 +1,6 @@
 package com.baylor.lockmanager.transaction;
 
-public class Transaction {
+public class Transaction implements Comparable{
 
 	private String id;
 
@@ -14,6 +14,12 @@ public class Transaction {
 
 	public void setId(String id) {
 		this.id = id;
+	}
+
+	@Override
+	public int compareTo(Object o) {
+		// TODO Auto-generated method stub
+		return 0;
 	}
 
 }
